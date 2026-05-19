@@ -41,11 +41,118 @@ app.get('/v1/models', (req, res) => {
 
 // Chat completions proxy
 app.post('/v1/chat/completions', async (req, res) => {
+
   try {
-    const { model, messages, temperature, max_tokens, stream } = req.body;
-    if (!model || !messages) {
-      return res.status(400).json({ error: { message: 'Missing model or messages', type: 'invalid_request_error' } });
+
+    const {
+      model,
+      messages,
+      stream,
+      temperature,
+      max_tokens
+    } = req.body;
+
+    const nimModel =
+      MODEL_MAP[model] ||
+      'meta/llama-3.1-70b-instruct';
+
+    const upstream = await axios({
+      method: 'post',
+      url: `${NIM_API_BASE}/chat/completions`,
+      responseType: 'stream',
+      timeout: 0,
+      headers: {
+        Authorization: `Bearer ${NIM_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      data: {
+        model: nimModel,
+        messages,
+        stream: true,
+        temperature: temperature ?? 0.7,
+        max_tokens: max_tokens ?? 512
+      }
+    });
+
+    res.status(200);
+
+    res.set({
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no'
+    });
+
+    res.flushHeaders?.();
+
+    // IMPORTANT:
+    // Send immediate chunk so Render knows stream is alive
+
+    res.write(': connected\n\n');
+
+    // heartbeat every 10s
+
+    const heartbeat = setInterval(() => {
+      res.write(': ping\n\n');
+    }, 10000);
+
+    upstream.data.on('data', chunk => {
+
+      // flush immediately
+
+      res.write(chunk);
+
+    });
+
+    upstream.data.on('end', () => {
+
+      clearInterval(heartbeat);
+
+      res.write('data: [DONE]\n\n');
+
+      res.end();
+
+    });
+
+    upstream.data.on('error', err => {
+
+      console.error('STREAM ERROR', err);
+
+      clearInterval(heartbeat);
+
+      res.end();
+
+    });
+
+    req.on('close', () => {
+
+      clearInterval(heartbeat);
+
+      upstream.data.destroy?.();
+
+    });
+
+  } catch (err) {
+
+    console.error(err?.response?.data || err);
+
+    if (!res.headersSent) {
+
+      res.status(500).json({
+        error: {
+          message: err.message
+        }
+      });
+
+    } else {
+
+      res.end();
+
     }
+
+  }
+
+});
     // Trim message history if too long
     const recentMsgs = messages.slice(-12);
 
