@@ -175,3 +175,6 @@ const server = app.listen(PORT, () => {
   console.log(`Proxy running on port ${PORT}`);
 });
 server.setTimeout(0);  // Disable default 2min timeout for long streams
+server.timeout = 0;
+server.keepAliveTimeout = 0;
+server.headersTimeout = 0;
