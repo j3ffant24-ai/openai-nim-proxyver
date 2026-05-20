@@ -153,6 +153,8 @@ app.post('/v1/chat/completions', async (req, res) => {
   }
 
 });
+
+console.log(JSON.stringify(messages).length);
     // Trim message history if too long
     const recentMsgs = messages.slice(-12);
 
