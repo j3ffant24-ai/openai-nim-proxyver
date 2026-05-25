@@ -1,4 +1,3 @@
-// server.js
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
@@ -6,138 +5,128 @@ const cors = require('cors');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const NIM_API_BASE =
-  process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
-
+const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
 const NIM_API_KEY = process.env.NIM_API_KEY;
-
-if (!NIM_API_KEY) {
-  console.error("❌ Missing NIM_API_KEY");
-  process.exit(1);
-}
-
-const MODEL_MAP = {
-  'gpt-3.5-turbo': 'meta/llama-3.1-8b-instruct',
-  'gpt-4': 'meta/llama-3.1-70b-instruct',
-  'gpt-4-turbo': 'meta/llama-3.1-70b-instruct',
-  'gpt-4o': 'meta/llama-3.1-70b-instruct',
-  'gpt-3': 'meta/llama-3.1-8b-instruct',
-  'claude-3-opus': 'meta/llama-3.1-70b-instruct',
-  'claude-3-sonnet': 'meta/llama-3.1-70b-instruct',
-  'gemini-pro': 'deepseek-ai/deepseek-v4-pro',
-  'deepseek-3': 'meta/llama-3.1-8b-instruct'
-};
 
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true }));
 
-// Health
+const MODEL_MAP = {
+  'gpt-3.5-turbo': 'nvidia/llama-3.1-nemotron-ultra-253b-v1',
+  'gpt-4': 'qwen/qwen3-coder-480b-a35b-instruct',
+  'gpt-4-turbo': 'moonshotai/kimi-k2-instruct-0905',
+  'gpt-4o': 'z-ai/glm4.7',
+  'gpt-3': 'deepseek-ai/deepseek-r1-distill-qwen-32b',
+  'claude-3-opus': 'openai/gpt-oss-120b',
+  'claude-3-sonnet': 'openai/gpt-oss-20b',
+  'gemini-pro': 'deepseek-ai/deepseek-v4-pro'
+};
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
-// Models
 app.get('/v1/models', (req, res) => {
   res.json({
     object: 'list',
     data: Object.keys(MODEL_MAP).map(id => ({
       id,
-      object: 'model'
+      object: 'model',
+      created: Date.now(),
+      owned_by: 'nim-proxy'
     }))
   });
 });
 
-// Chat completions
 app.post('/v1/chat/completions', async (req, res) => {
   try {
-    const {
-      model,
-      messages,
-      stream = true,
-      temperature,
-      max_tokens
-    } = req.body;
+    const { model, messages, temperature, max_tokens } = req.body;
 
-    const nimModel =
-      MODEL_MAP[model] || 'meta/llama-3.1-8b-instruct';
+    const nimModel = MODEL_MAP[model] || 'meta/llama-3.1-70b-instruct';
 
-    const trimmedMessages = (messages || []).slice(-12);
-
-    const response = await axios({
-      method: 'post',
-      url: `${NIM_API_BASE}/chat/completions`,
-      responseType: stream ? 'stream' : 'json',
-      timeout: 120000,
-      headers: {
-        Authorization: `Bearer ${NIM_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      data: {
+    const upstream = await axios.post(
+      `${NIM_API_BASE}/chat/completions`,
+      {
         model: nimModel,
-        messages: trimmedMessages,
+        messages,
         stream: true,
         temperature: temperature ?? 0.7,
-        max_tokens: Math.min(max_tokens ?? 512, 1024)
+        max_tokens: max_tokens ?? 1024
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${NIM_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        responseType: 'stream',
+        timeout: 0
+      }
+    );
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders?.();
+
+    res.write(': connected\n\n');
+
+    // KEEP ALIVE (VERY IMPORTANT FOR RENDER + JANITOR)
+    const heartbeat = setInterval(() => {
+      res.write(': ping\n\n');
+    }, 15000);
+
+    upstream.data.on('data', (chunk) => {
+      const text = chunk.toString();
+
+      for (const line of text.split('\n')) {
+        if (!line.startsWith('data:')) continue;
+
+        const payload = line.replace('data: ', '').trim();
+
+        if (payload === '[DONE]') continue;
+
+        try {
+          const json = JSON.parse(payload);
+          res.write(`data: ${JSON.stringify(json)}\n\n`);
+        } catch (e) {
+          // ignore bad chunks
+        }
       }
     });
 
-    // STREAM MODE (JanitorAI safe)
-    if (stream) {
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache, no-transform');
-      res.setHeader('Connection', 'keep-alive');
+    upstream.data.on('end', () => {
+      clearInterval(heartbeat);
+      res.write('data: [DONE]\n\n');
+      res.end();
+    });
 
-      response.data.on('data', chunk => {
-        res.write(chunk);
-      });
+    upstream.data.on('error', () => {
+      clearInterval(heartbeat);
+      res.end();
+    });
 
-      response.data.on('end', () => {
-        res.write('data: [DONE]\n\n');
-        res.end();
-      });
-
-      response.data.on('error', err => {
-        console.error("STREAM ERROR:", err.message);
-        res.end();
-      });
-
-      req.on('close', () => {
-        response.data.destroy?.();
-      });
-
-      return;
-    }
-
-    // NON-STREAM MODE
-    const data = response.data;
-
-    res.json({
-      id: `chatcmpl-${Date.now()}`,
-      object: 'chat.completion',
-      created: Math.floor(Date.now() / 1000),
-      model: nimModel,
-      choices: data.choices || []
+    req.on('close', () => {
+      clearInterval(heartbeat);
+      upstream.data.destroy?.();
     });
 
   } catch (err) {
-    console.error("PROXY ERROR:", err.response?.data || err.message);
+    console.error(err?.response?.data || err);
 
-    res.status(err.response?.status || 500).json({
-      error: {
-        message: err.message,
-        type: 'api_error',
-        code: err.response?.status || 500
-      }
-    });
+    if (!res.headersSent) {
+      res.status(500).json({
+        error: {
+          message: err.message,
+          type: 'proxy_error'
+        }
+      });
+    } else {
+      res.end();
+    }
   }
 });
 
-app.all('*', (req, res) => {
-  res.status(404).json({
-    error: { message: 'Not found', code: 404 }
-  });
-});
-
 app.listen(PORT, () => {
-  console.log(`Proxy running on port ${PORT}`);
+  console.log(`Proxy running on ${PORT}`);
 });
