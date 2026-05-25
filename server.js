@@ -24,7 +24,7 @@ const MODEL_MAP = {
   'gpt-3': 'meta/llama-3.1-8b-instruct',
   'claude-3-opus': 'meta/llama-3.1-70b-instruct',
   'claude-3-sonnet': 'meta/llama-3.1-70b-instruct',
-  'gemini-pro': 'meta/llama-3.1-8b-instruct',
+  'gemini-pro': 'deepseek-ai/deepseek-v4-pro',
   'deepseek-3': 'meta/llama-3.1-8b-instruct'
 };
 
